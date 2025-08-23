@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Propriedade = require('../models/propriedade');
+const neo4jDriver = require("../config/neo4j");
 
 // Middleware para buscar propriedade por ID
 async function getPropriedade(req, res, next) {
@@ -33,12 +34,12 @@ router.get('/:id', getPropriedade, (req, res) => {
 });
 
 // Rota: Criar uma nova propriedade (CREATE)
-router.post('/', async (req, res) => {
+router.post("/", async (req, res) => {
     const { nome, descricao, areaHectares, culturaPrincipal, localizacao, tags } = req.body;
 
     // Validação básica para GeoJSON Point
-    if (!localizacao || localizacao.type !== 'Point' || !Array.isArray(localizacao.coordinates) || localizacao.coordinates.length !== 2) {
-        return res.status(400).json({ message: 'Formato de localização inválido. Esperado { type: "Point", coordinates: [longitude, latitude] }' });
+    if (!localizacao || localizacao.type !== "Point" || !Array.isArray(localizacao.coordinates) || localizacao.coordinates.length !== 2) {
+        return res.status(400).json({ message: "Formato de localização inválido. Esperado { type: \"Point\", coordinates: [longitude, latitude] }" });
     }
 
     const propriedade = new Propriedade({
@@ -50,47 +51,35 @@ router.post('/', async (req, res) => {
         tags
     });
 
+    let session; // Declarada a sessão fora do try para que possa ser acessada no finally
     try {
         const novaPropriedade = await propriedade.save();
+
+        // Operação no Neo4J
+        session = neo4jDriver.session();
+        const query = `
+            CREATE (p:Propriedade {mongo_id: $mongoId, nome: $nome})
+            ${culturaPrincipal ? `
+                MERGE (c:Cultura {nome: $culturaPrincipal})
+                CREATE (p)-[:PRODUZ]->(c)
+            ` : ``}
+            RETURN p
+        `;
+        await session.run(query, {
+            mongoId: novaPropriedade._id.toString(), // Armazena o ID do MongoDB no Neo4J
+            nome: novaPropriedade.nome,
+            culturaPrincipal: novaPropriedade.culturaPrincipal
+        });
+        console.log(`Nó Propriedade ${novaPropriedade.nome} e relacionamentos criados no Neo4J.`);
+
         res.status(201).json(novaPropriedade);
     } catch (err) {
+        console.error("Erro ao salvar propriedade no MongoDB ou Neo4J:", err);
         res.status(400).json({ message: err.message });
-    }
-});
-
-// Rota: Atualizar uma propriedade (UPDATE)
-router.patch('/:id', getPropriedade, async (req, res) => {
-    // Atualiza apenas os campos que foram enviados na requisição
-    if (req.body.nome != null) {
-        res.propriedade.nome = req.body.nome;
-    }
-    if (req.body.descricao != null) {
-        res.propriedade.descricao = req.body.descricao;
-    }
-    if (req.body.areaHectares != null) {
-        res.propriedade.areaHectares = req.body.areaHectares;
-    }
-    if (req.body.culturaPrincipal != null) {
-        res.propriedade.culturaPrincipal = req.body.culturaPrincipal;
-    }
-    if (req.body.localizacao != null) {
-        // Validação básica para GeoJSON Point na atualização
-        if (req.body.localizacao.type !== 'Point' || !Array.isArray(req.body.localizacao.coordinates) || req.body.localizacao.coordinates.length !== 2) {
-            return res.status(400).json({ message: 'Formato de localização inválido na atualização.' });
+    } finally {
+        if (session) {
+            session.close();
         }
-        res.propriedade.localizacao = req.body.localizacao;
-    }
-    if (req.body.tags != null) {
-        res.propriedade.tags = req.body.tags;
-    }
-
-    res.propriedade.updatedAt = Date.now(); // Atualiza o timestamp de atualização
-
-    try {
-        const propriedadeAtualizada = await res.propriedade.save();
-        res.json(propriedadeAtualizada);
-    } catch (err) {
-        res.status(400).json({ message: err.message });
     }
 });
 
